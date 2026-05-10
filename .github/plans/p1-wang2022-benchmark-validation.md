@@ -64,7 +64,7 @@
 
 ### Phase 1: Benchmark 数据结构化
 
-#### Task 1.1: 创建 ISS-I CD2 单塔 fixture 文件
+#### ✅ Task 1.1: 创建 ISS-I CD2 单塔 fixture 文件
 - **目标**：将 Wang et al. 2022 Table 1/5/8/9 中 ISS-I CD2 的完整数值数据结构化为 JSON
 - **依赖**：无
 - **修改内容**：
@@ -88,7 +88,7 @@
   - ✅ tolerances 字段已填写（composition_rel: 0.15, temperature_abs_K: 1.0, heat_load_rel: 0.25）
 - **潜在风险**：Table 9 中 CD2 的产品流量数值可能因 OCR 提取有微小误差——需交叉核对 `docs/benchmark/aspen_benchmark_candidates.md` 中两处记录
 
-#### Task 1.2: 创建 ISS-O 三塔 fixture 文件
+#### ✅ Task 1.2: 创建 ISS-O 三塔 fixture 文件
 - **目标**：将 Wang et al. 2022 Table 2/5/11/12/13 中 ISS-O 的完整数值数据结构化为 JSON
 - **依赖**：无
 - **修改内容**：
