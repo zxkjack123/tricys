@@ -204,7 +204,7 @@
 
 ### Phase 4: 自动化测试与报告更新
 
-#### Task 4.1: 编写 pytest benchmark 测试
+#### ✅ Task 4.1: 编写 pytest benchmark 测试
 - **目标**：将 Phase 2/3 的比对逻辑封装为 pytest 参数化测试
 - **依赖**：T2.2, T3.2
 - **修改内容**：
