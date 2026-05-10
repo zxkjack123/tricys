@@ -97,32 +97,49 @@ def _set_feed_composition(stream_obj, total_flow_mol_h, composition):
         stream_obj.SetOverallCompoundMolarFlow(dwsim_name, mol_flow)
 
 
-def build_single_column(sim, fixture):
+def build_single_column(sim, interf, fixture, num_stages=15, tol=0.01):
     """Build a single distillation column from fixture data.
+
+    IMPORTANT: Uses direct Specs dictionary manipulation instead of
+    SetCondenserSpec/SetReboilerSpec, which have a bug in DWSIM 9.x headless
+    mode that corrupts the spec SType to Heat_Duty.
+
+    DWSIM's bubble-point solver cannot converge >10 stages (tol=0.001) or
+    >15 stages (tol=0.01) for close-boiling H-isotope systems (α≈1.24).
+    The num_stages parameter defaults to 15, which is the practical limit.
 
     Args:
         sim: DWSIM flowsheet (with compounds and property package)
+        interf: DWSIM Automation interface
         fixture: Loaded JSON fixture dict (wang2022_issi_cd2.json schema)
+        num_stages: Number of theoretical stages (default 15, max convergible)
+        tol: Convergence tolerance (default 0.01; 0.001 only works at ≤10 stages)
 
     Returns:
-        dict {"column": dc_obj, "streams": {"feed": ..., "distillate": ..., "bottoms": ...},
-              "energy": {"condenser": ..., "reboiler": ...}}
+        dict {"column": dc_obj, "streams": {...}, "energy": {...},
+              "degraded_stages": int or None, "target_stages": int}
     """
     from DWSIM.Interfaces.Enums.GraphicObjects import ObjectType
 
     feed_data = fixture["feed"]
     col_data = fixture["column"]
 
-    # Create feed stream
+    # Create feed stream with mid-column conditions for better flash calc
+    mid_pressure = (col_data["pressure_top_Pa"] + col_data["pressure_bottom_Pa"]) / 2
     feed = sim.AddObject(ObjectType.MaterialStream, 50, 200, "FEED")
     feed_obj = feed.GetAsObject()
-    feed_obj.SetTemperature(22.0)  # Initial estimate (K)
-    feed_obj.SetPressure(col_data["pressure_top_Pa"])
+    feed_obj.SetTemperature(23.5)  # Mid-range estimate for D2/DT system
+    feed_obj.SetPressure(mid_pressure)
     _set_feed_composition(
         feed_obj,
         feed_data["total_flow_mol_h"],
         feed_data["composition_mole_fraction"],
     )
+
+    # Pre-calculate feed stream (critical for column convergence)
+    interf.CalculateFlowsheet2(sim)
+    if feed_obj.Calculated:
+        print(f"  Feed pre-calculated: T={feed_obj.GetTemperature():.2f} K")
 
     # Create output streams
     dist = sim.AddObject(ObjectType.MaterialStream, 300, 50, "DISTILLATE")
@@ -139,43 +156,59 @@ def build_single_column(sim, fixture):
     qr_obj = qr.GetAsObject()
 
     # Create distillation column
+    target_stages = col_data["total_stages"]
+    original_feed = col_data["feed_stage"]
+    feed_stage = max(2, int(original_feed * num_stages / target_stages))
+
     dc = sim.AddObject(ObjectType.DistillationColumn, 200, 200, col_data["name"])
     dc_obj = dc.GetAsObject()
 
-    dc_obj.SetNumberOfStages(col_data["total_stages"])
+    dc_obj.SetNumberOfStages(num_stages)
     dc_obj.SetTopPressure(col_data["pressure_top_Pa"])
     dc_obj.ColumnPressureDrop = (
         col_data["pressure_bottom_Pa"] - col_data["pressure_top_Pa"]
     )
 
-    # Convergence settings — relaxed for high stage count
-    dc_obj.ExternalLoopTolerance = 0.001
-    dc_obj.InternalLoopTolerance = 0.001
+    # Convergence settings
+    dc_obj.ExternalLoopTolerance = tol
+    dc_obj.InternalLoopTolerance = tol
     dc_obj.MaxIterations = 500
 
-    # Set column specs: reflux ratio + bottoms flow rate
-    dc_obj.SetCondenserSpec("R", col_data["reflux_ratio"], "mol/mol", "")
-
-    # Calculate bottoms flow from D/F ratio
+    # Set column specs via direct Specs dictionary manipulation.
+    # DO NOT use SetCondenserSpec/SetReboilerSpec — they corrupt SType to
+    # Heat_Duty in DWSIM 9.x headless mode (pythonnet/.NET 8).
+    # The Specs dict has keys "C" (condenser) and "R" (reboiler).
+    # Default STypes: C=Stream_Ratio (reflux ratio), R=Product_Molar_Flow_Rate.
+    target_R = col_data["reflux_ratio"]
     total_feed = feed_data["total_flow_mol_h"] / 3600.0  # mol/s
     d_f = col_data["distillate_to_feed_ratio"]
     bottoms_flow = total_feed * (1.0 - d_f)
-    dc_obj.SetReboilerSpec("B", bottoms_flow, "mol/s", "")
+
+    spec_c = dc_obj.Specs["C"]  # Condenser spec (default: Stream_Ratio)
+    spec_r = dc_obj.Specs["R"]  # Reboiler spec (default: Product_Molar_Flow_Rate)
+    # Keep default SType values (do NOT reassign — they are already correct)
+    spec_c.SpecValue = float(target_R)
+    spec_r.SpecValue = bottoms_flow
+    spec_r.SpecUnit = "mol/s"
 
     # Connect streams
-    dc_obj.ConnectFeed(feed_obj, col_data["feed_stage"])
+    dc_obj.ConnectFeed(feed_obj, feed_stage)
     dc_obj.ConnectDistillate(dist_obj)
     dc_obj.ConnectBottoms(bott_obj)
     dc_obj.ConnectCondenserDuty(qc_obj)
     dc_obj.ConnectReboilerDuty(qr_obj)
 
-    print(f"  Built {col_data['name']}: {col_data['total_stages']} stages, "
-          f"R={col_data['reflux_ratio']}, feed@{col_data['feed_stage']}")
+    degraded = num_stages if num_stages < target_stages else None
+    print(f"  Built {col_data['name']}: {num_stages} stages "
+          f"{'(degraded from ' + str(target_stages) + ')' if degraded else ''}, "
+          f"R={target_R}, B={bottoms_flow:.6e} mol/s, feed@{feed_stage}, tol={tol}")
 
     return {
         "column": dc_obj,
         "streams": {"feed": feed_obj, "distillate": dist_obj, "bottoms": bott_obj},
         "energy": {"condenser": qc_obj, "reboiler": qr_obj},
+        "degraded_stages": degraded,
+        "target_stages": target_stages,
     }
 
 
@@ -263,16 +296,12 @@ def build_isso_three_columns(sim, fixture):
         dc_obj.SetTopPressure(cfg["pressure_top_Pa"])
         dc_obj.ColumnPressureDrop = cfg["pressure_bottom_Pa"] - cfg["pressure_top_Pa"]
 
-        dc_obj.ExternalLoopTolerance = 0.005
-        dc_obj.InternalLoopTolerance = 0.005
+        dc_obj.ExternalLoopTolerance = 0.01
+        dc_obj.InternalLoopTolerance = 0.01
         dc_obj.MaxIterations = 500
 
-        dc_obj.SetCondenserSpec("R", cfg["reflux_ratio"], "mol/mol", "")
-
-        # Estimate bottoms flow from D/F ratio
-        # For CD1: feed is WDS (280 mol/h)
-        # For CD2: feed is TES (160) + CD1_BOTT, approximate
-        # For CD3: feed is CD2_BOTT, approximate
+        # Set column specs via direct Specs dictionary (workaround for
+        # broken SetCondenserSpec/SetReboilerSpec API in DWSIM 9.x)
         if col_name == "CD1":
             total_feed = feeds_data["WDS"]["total_flow_mol_h"] / 3600.0
         elif col_name == "CD2":
@@ -280,8 +309,15 @@ def build_isso_three_columns(sim, fixture):
         else:
             total_feed = 3.0 / 3600.0  # Approximate CD3 feed
 
-        bottoms_flow = total_feed * (1.0 - cfg["distillate_to_feed_ratio"])
-        dc_obj.SetReboilerSpec("B", bottoms_flow, "mol/s", "")
+        d_f = cfg["distillate_to_feed_ratio"]
+        bottoms_flow = total_feed * (1.0 - d_f)
+        target_R = cfg["reflux_ratio"]
+
+        spec_c = dc_obj.Specs["C"]  # Condenser: Stream_Ratio (reflux)
+        spec_r = dc_obj.Specs["R"]  # Reboiler: Product_Molar_Flow_Rate
+        spec_c.SpecValue = float(target_R)
+        spec_r.SpecValue = bottoms_flow
+        spec_r.SpecUnit = "mol/s"
 
         objects["columns"][col_name] = dc_obj
         print(f"  Built {col_name}: {cfg['total_stages']} stages, R={cfg['reflux_ratio']}")
@@ -350,7 +386,8 @@ def extract_column_results(sim, interf, column_obj, dist_stream, bott_stream,
     def _get_stream_flow(stream_obj):
         """Get total molar flow in mol/h."""
         try:
-            return stream_obj.GetMolarFlow() * 3600.0
+            flow = stream_obj.GetMolarFlow()
+            return float(flow) * 3600.0 if flow is not None else 0.0
         except Exception:
             return 0.0
 
@@ -359,27 +396,43 @@ def extract_column_results(sim, interf, column_obj, dist_stream, bott_stream,
     top_flow = _get_stream_flow(dist_stream)
     bottom_flow = _get_stream_flow(bott_stream)
 
-    # Get temperatures from column stages
+    # Get temperatures — prefer distillate/bottoms stream temperatures
+    # as stage T access can be unreliable in headless mode
     try:
-        stages = column_obj.Stages
-        n_stages = stages.Count
-        top_T = stages[0].T  # Condenser temperature
-        bot_T = stages[n_stages - 1].T  # Reboiler temperature
+        top_T = dist_stream.GetTemperature()
+        if top_T is None or top_T < 1.0:
+            top_T = 0.0
+        else:
+            top_T = float(top_T)
     except Exception:
         top_T = 0.0
+    try:
+        bot_T = bott_stream.GetTemperature()
+        if bot_T is None or bot_T < 1.0:
+            bot_T = 0.0
+        else:
+            bot_T = float(bot_T)
+    except Exception:
         bot_T = 0.0
 
-    # Get heat loads from energy streams
+    # Get heat loads from energy streams (DWSIM returns kW, convert to W)
     cond_duty = 0.0
     reb_duty = 0.0
     if qc_stream is not None:
         try:
-            cond_duty = qc_stream.EnergyFlow  # W or kW depending on DWSIM
+            ef = qc_stream.EnergyFlow  # kW
+            cond_duty = float(ef) * 1000.0 if ef is not None else 0.0
+            # Condenser duty should be negative (heat removed)
+            if cond_duty > 0:
+                cond_duty = -cond_duty
         except Exception:
             pass
     if qr_stream is not None:
         try:
-            reb_duty = qr_stream.EnergyFlow
+            ef = qr_stream.EnergyFlow  # kW
+            reb_duty = float(ef) * 1000.0 if ef is not None else 0.0
+            # Reboiler duty should be positive (heat added)
+            reb_duty = abs(reb_duty)
         except Exception:
             pass
 
@@ -413,6 +466,8 @@ def compare_with_expected(actual, expected, tolerances):
             if not isinstance(exp_val, (int, float)):
                 continue
             act_val = actual_comp.get(species, 0.0)
+            if act_val is None:
+                act_val = 0.0
             if abs(exp_val) > 1e-10:
                 dev = abs(act_val - exp_val) / abs(exp_val)
             else:
@@ -433,6 +488,8 @@ def compare_with_expected(actual, expected, tolerances):
     for pos in ["top", "bottom"]:
         exp_val = exp_temps.get(pos)
         act_val = act_temps.get(f"{pos}_K", 0.0)
+        if act_val is None:
+            act_val = 0.0
         if exp_val is not None and isinstance(exp_val, (int, float)):
             dev = abs(act_val - exp_val)
             tol = tolerances.get("temperature_abs_K", 1.0)
@@ -450,6 +507,8 @@ def compare_with_expected(actual, expected, tolerances):
     for duty in ["condenser", "reboiler"]:
         exp_val = exp_hl.get(duty)
         act_val = act_hl.get(f"{duty}_W", 0.0)
+        if act_val is None:
+            act_val = 0.0
         if exp_val is not None and isinstance(exp_val, (int, float)):
             if abs(exp_val) > 1e-6:
                 dev = abs(act_val - exp_val) / abs(exp_val)
@@ -497,6 +556,11 @@ def print_deviation_table(rows, title=""):
 def run_issi_cd2_benchmark(fixture_path=None):
     """Run ISS-I CD2 single-column benchmark.
 
+    Convergence strategy:
+    1. Build column at 15 stages (tol=0.01) — practical DWSIM limit for α≈1.24
+    2. If 15 stages fails, fall back to 10 stages (tol=0.001)
+    3. Document stage degradation from target 75 stages
+
     Returns:
         dict with keys: actual_results, comparison_table, pass_count, total_count
     """
@@ -510,42 +574,43 @@ def run_issi_cd2_benchmark(fixture_path=None):
 
     print("Initializing DWSIM...")
     interf = setup_dwsim()
-    sim = create_base_flowsheet(interf)
 
-    print("Building ISS-I CD2 single column...")
-    built = build_single_column(sim, fixture)
+    # Try 15 stages first (tol=0.01), fall back to 10 (tol=0.001)
+    convergence_attempts = [
+        (15, 0.01),   # Best achievable with relaxed tolerance
+        (10, 0.001),  # Fallback with tight tolerance
+    ]
 
-    print("Solving flowsheet...")
+    built = None
+    sim = None
     converged = False
-    for attempt in range(10):
-        try:
-            interf.CalculateFlowsheet2(sim)
-        except Exception as e:
-            print(f"  Solve exception (attempt {attempt+1}): {e}")
-            continue
 
-        if built["column"].Calculated:
-            converged = True
-            print(f"  Converged on attempt {attempt+1}")
-            break
-        else:
-            print(f"  Not converged (attempt {attempt+1}), retrying...")
+    for num_stages, tol in convergence_attempts:
+        sim = create_base_flowsheet(interf)
+        print(f"Building ISS-I CD2 single column ({num_stages} stages, tol={tol})...")
+        built = build_single_column(sim, interf, fixture, num_stages=num_stages, tol=tol)
 
-    if not converged:
-        print("  WARNING: Column did not converge after 10 attempts")
-        # Try with relaxed tolerances
-        print("  Retrying with relaxed tolerances...")
-        built["column"].ExternalLoopTolerance = 0.01
-        built["column"].InternalLoopTolerance = 0.01
-        for attempt in range(5):
+        print(f"Solving flowsheet...")
+        for attempt in range(15):
             try:
                 interf.CalculateFlowsheet2(sim)
-            except Exception:
+            except Exception as e:
+                print(f"  Exception (attempt {attempt + 1}): {e}")
                 continue
+
             if built["column"].Calculated:
                 converged = True
-                print(f"  Converged with relaxed tolerance (attempt {attempt+1})")
+                print(f"  Converged at {num_stages} stages (attempt {attempt + 1})")
                 break
+
+        if converged:
+            break
+        else:
+            print(f"  Failed at {num_stages} stages, trying fallback...")
+
+    if not converged:
+        print("  WARNING: Column did not converge at any stage count")
+        print("  Proceeding with unconverged results.")
 
     # Extract results
     actual = extract_column_results(
@@ -556,6 +621,8 @@ def run_issi_cd2_benchmark(fixture_path=None):
         built["energy"]["reboiler"],
     )
     actual["converged"] = converged
+    actual["degraded_stages"] = built.get("degraded_stages")
+    actual["target_stages"] = built.get("target_stages")
 
     # Compare with expected
     comparison = compare_with_expected(
@@ -578,6 +645,19 @@ def run_issi_cd2_benchmark(fixture_path=None):
         "comparison": comparison,
         "pass_count": pass_count,
         "total_count": total_count,
+        "notes": {
+            "degraded_stages": actual.get("degraded_stages"),
+            "target_stages": actual.get("target_stages"),
+            "dwsim_limitation": (
+                "DWSIM bubble-point solver cannot converge >15 stages "
+                "for close-boiling H-isotope systems (α_D2/DT ≈ 1.24). "
+                "SetCondenserSpec/SetReboilerSpec API has a bug that "
+                "corrupts spec SType to Heat_Duty; workaround uses direct "
+                "Specs dictionary manipulation. Bottom DT enrichment "
+                "requires >50 stages (Fenske N_min), which exceeds DWSIM's "
+                "convergence limit for this system."
+            ),
+        },
     }
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2, default=str)

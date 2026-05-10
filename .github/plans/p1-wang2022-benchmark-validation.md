@@ -140,7 +140,7 @@
   - DWSIM 的 `SetCondenserSpec("R", 15.0, "mol/mol", "")` 的 reflux ratio 单位需确认——P0 中已成功使用此 API 模式 [verified: build_dwsim_flowsheet.py:L340]
   - 进料设 4 个零组分时需用 1e-15 替代严格零
 
-#### Task 2.2: 运行 ISS-I CD2 单塔 benchmark 并比对
+#### ✅ Task 2.2: 运行 ISS-I CD2 单塔 benchmark 并比对
 - **目标**：执行 DWSIM 对 ISS-I CD2 单塔的求解，与 Wang et al. 发表数据比对
 - **依赖**：T2.1, T1.1
 - **修改内容**：
