@@ -115,7 +115,7 @@
 
 ### Phase 2: 单塔 Benchmark 实现（ISS-I CD2）
 
-#### Task 2.1: 实现 benchmark 模型构建模块
+#### ✅ Task 2.1: 实现 benchmark 模型构建模块
 - **目标**：新建 `benchmark_wang2022.py`，实现从 fixture JSON 构建 DWSIM 单塔和三塔模型的函数
 - **依赖**：T1.1
 - **修改内容**：
