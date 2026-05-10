@@ -227,7 +227,7 @@
   - ✅ 所有 FAIL 的测试有明确的 failure message（含 expected/actual/deviation）
 - **潜在风险**：DWSIM 求解时间可能较长（75 级单塔 ~30s，三塔 ~120s）——添加 `@pytest.mark.slow` 标记
 
-#### Task 4.2: 更新 parity report 和 benchmark 文档
+#### ✅ Task 4.2: 更新 parity report 和 benchmark 文档
 - **目标**：将 benchmark 结果整合到 parity report 和 benchmark 文档中
 - **依赖**：T4.1
 - **修改内容**：
