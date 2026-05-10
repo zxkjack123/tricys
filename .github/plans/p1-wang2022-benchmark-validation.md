@@ -183,7 +183,7 @@
   - 跳过 Equilibrator 会导致 CD3 的进料组成与原文不同（原文经催化平衡后 HT 部分转化为 H2+T2）——这是已知的拓扑简化，需在报告中注明
   - ISS-O 塔间有循环流（CD2 底→CD1 stage 15），DWSIM 处理循环流需迭代收敛，可能不收敛——缓解：先用开环拓扑（不回流），再逐步加入回流
 
-#### Task 3.2: 运行 ISS-O benchmark 并比对
+#### ✅ Task 3.2: 运行 ISS-O benchmark 并比对
 - **目标**：执行 DWSIM 对 ISS-O 三塔模型的求解，与 Wang et al. Table 11/12/13 比对
 - **依赖**：T3.1
 - **修改内容**：
