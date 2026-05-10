@@ -212,7 +212,7 @@ def build_single_column(sim, interf, fixture, num_stages=15, tol=0.01):
     }
 
 
-def build_isso_three_columns(sim, fixture):
+def build_isso_three_columns(sim, interf, fixture, num_stages_factor=1.0, tol=0.01):
     """Build ISS-O three-column cascade from fixture data.
 
     Simplified topology (no equilibrator):
@@ -227,9 +227,15 @@ def build_isso_three_columns(sim, fixture):
     Note: CD2_bottom → CD1 recycle (stage 15) is omitted initially
     to avoid convergence issues with the recycle loop.
 
+    Uses direct Specs dictionary manipulation (workaround for DWSIM 9.x
+    SetCondenserSpec/SetReboilerSpec bug that corrupts SType to Heat_Duty).
+
     Args:
         sim: DWSIM flowsheet (with compounds and property package)
+        interf: DWSIM Automation interface
         fixture: Loaded JSON fixture dict (wang2022_isso.json schema)
+        num_stages_factor: Stage degradation factor (0-1, default 1.0 = full)
+        tol: Convergence tolerance (default 0.01)
 
     Returns:
         dict {"columns": {name: obj}, "streams": {name: obj}, "energy": {name: obj}}
@@ -264,6 +270,13 @@ def build_isso_three_columns(sim, fixture):
     )
     objects["streams"]["TES_FEED"] = tes_obj
 
+    # Pre-calculate feed streams (critical for column convergence)
+    interf.CalculateFlowsheet2(sim)
+    for nm in ["WDS_FEED", "TES_FEED"]:
+        s = objects["streams"][nm]
+        if s.Calculated:
+            print(f"  {nm} pre-calculated: T={s.GetTemperature():.2f} K")
+
     # --- Create inter-column and product streams ---
     stream_defs = {
         "CD1_TOP": (250, 50),    # H2 exhaust
@@ -292,12 +305,14 @@ def build_isso_three_columns(sim, fixture):
         dc = sim.AddObject(ObjectType.DistillationColumn, x, 200, col_name)
         dc_obj = dc.GetAsObject()
 
-        dc_obj.SetNumberOfStages(cfg["total_stages"])
+        target_stages = cfg["total_stages"]
+        actual_stages = max(5, int(target_stages * num_stages_factor))
+        dc_obj.SetNumberOfStages(actual_stages)
         dc_obj.SetTopPressure(cfg["pressure_top_Pa"])
         dc_obj.ColumnPressureDrop = cfg["pressure_bottom_Pa"] - cfg["pressure_top_Pa"]
 
-        dc_obj.ExternalLoopTolerance = 0.01
-        dc_obj.InternalLoopTolerance = 0.01
+        dc_obj.ExternalLoopTolerance = tol
+        dc_obj.InternalLoopTolerance = tol
         dc_obj.MaxIterations = 500
 
         # Set column specs via direct Specs dictionary (workaround for
@@ -320,20 +335,32 @@ def build_isso_three_columns(sim, fixture):
         spec_r.SpecUnit = "mol/s"
 
         objects["columns"][col_name] = dc_obj
-        print(f"  Built {col_name}: {cfg['total_stages']} stages, R={cfg['reflux_ratio']}")
+        degraded = f" (degraded from {target_stages})" if actual_stages < target_stages else ""
+        print(f"  Built {col_name}: {actual_stages} stages{degraded}, "
+              f"R={target_R}, B={bottoms_flow:.6e} mol/s, tol={tol}")
 
-    # --- Connect streams ---
-    # CD1
-    objects["columns"]["CD1"].ConnectFeed(objects["streams"]["WDS_FEED"], 20)
+    # --- Connect streams (scale feed stages with num_stages_factor) ---
+    def _scale_stage(stage, total_target):
+        """Scale feed stage when stages are degraded."""
+        actual = max(5, int(total_target * num_stages_factor))
+        return max(2, int(stage * actual / total_target))
+
+    # CD1: WDS @ stage 20 (of 60)
+    cd1_stages = cols_data["CD1"]["total_stages"]
+    objects["columns"]["CD1"].ConnectFeed(
+        objects["streams"]["WDS_FEED"], _scale_stage(20, cd1_stages))
     objects["columns"]["CD1"].ConnectDistillate(objects["streams"]["CD1_TOP"])
     objects["columns"]["CD1"].ConnectBottoms(objects["streams"]["CD1_BOTT"])
     objects["columns"]["CD1"].ConnectCondenserDuty(objects["energy"]["QC_CD1"])
     objects["columns"]["CD1"].ConnectReboilerDuty(objects["energy"]["QR_CD1"])
 
-    # CD2: feeds = TES (stage 20) + CD1_BOTT (stage 35)
-    objects["columns"]["CD2"].ConnectFeed(objects["streams"]["TES_FEED"], 20)
+    # CD2: feeds = TES (stage 20) + CD1_BOTT (stage 35), of 70 total
+    cd2_stages = cols_data["CD2"]["total_stages"]
+    objects["columns"]["CD2"].ConnectFeed(
+        objects["streams"]["TES_FEED"], _scale_stage(20, cd2_stages))
     try:
-        objects["columns"]["CD2"].ConnectFeed(objects["streams"]["CD1_BOTT"], 35)
+        objects["columns"]["CD2"].ConnectFeed(
+            objects["streams"]["CD1_BOTT"], _scale_stage(35, cd2_stages))
         print("  CD2: multi-feed via ConnectFeed succeeded")
     except Exception as e:
         print(f"  CD2: multi-feed ConnectFeed failed ({e}), using single feed")
@@ -342,8 +369,10 @@ def build_isso_three_columns(sim, fixture):
     objects["columns"]["CD2"].ConnectCondenserDuty(objects["energy"]["QC_CD2"])
     objects["columns"]["CD2"].ConnectReboilerDuty(objects["energy"]["QR_CD2"])
 
-    # CD3: feed = CD2_BOTT (stage 30, no equilibrator)
-    objects["columns"]["CD3"].ConnectFeed(objects["streams"]["CD2_BOTT"], 30)
+    # CD3: feed = CD2_BOTT (stage 30, no equilibrator), of 60 total
+    cd3_stages = cols_data["CD3"]["total_stages"]
+    objects["columns"]["CD3"].ConnectFeed(
+        objects["streams"]["CD2_BOTT"], _scale_stage(30, cd3_stages))
     objects["columns"]["CD3"].ConnectDistillate(objects["streams"]["CD3_TOP"])
     objects["columns"]["CD3"].ConnectBottoms(objects["streams"]["CD3_BOTT"])
     objects["columns"]["CD3"].ConnectCondenserDuty(objects["energy"]["QC_CD3"])
@@ -351,8 +380,10 @@ def build_isso_three_columns(sim, fixture):
 
     # CD3 top recycle to CD2 stage 45 — try to connect
     try:
-        objects["columns"]["CD2"].ConnectFeed(objects["streams"]["CD3_TOP"], 45)
-        print("  CD2: CD3_TOP recycle feed connected at stage 45")
+        objects["columns"]["CD2"].ConnectFeed(
+            objects["streams"]["CD3_TOP"], _scale_stage(45, cd2_stages))
+        print("  CD2: CD3_TOP recycle feed connected at stage "
+              f"{_scale_stage(45, cd2_stages)}")
     except Exception as e:
         print(f"  CD2: CD3_TOP recycle connection failed ({e}), omitting recycle")
 

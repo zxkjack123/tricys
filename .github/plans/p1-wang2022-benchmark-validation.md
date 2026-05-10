@@ -161,7 +161,7 @@
 
 ### Phase 3: 三塔 Benchmark 实现（ISS-O）
 
-#### Task 3.1: 实现 ISS-O 三塔模型
+#### ✅ Task 3.1: 实现 ISS-O 三塔模型
 - **目标**：在 DWSIM 中构建 Wang et al. 2022 ISS-O 三塔级联模型
 - **依赖**：T1.2, T2.1（复用 `build_single_column()` 的 API 模式）
 - **修改内容**：
